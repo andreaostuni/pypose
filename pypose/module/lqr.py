@@ -261,12 +261,28 @@ class LQR(nn.Module):
                      [-0.0728,  0.7290, -0.3117]]])
     """
 
-    def __init__(self, system, Q, p, T):
+    def __init__(
+        self,
+        system: nn.Module,
+        Q: torch.Tensor,
+        p: torch.Tensor,
+        T: int,
+        max_linesearch_iter: int = 10,
+        linesearch_decay: float = 0.5,
+        max_qp_iter: int = 10,
+        qp_decay: float = 0.2,
+        gamma: float = 1e-1,
+    ):
         super().__init__()
         self.system = system
         self.Q, self.p, self.T = Q, p, T
         self.x_traj = None
         self.u_traj = None
+        self.max_linesearch_iter = max_linesearch_iter
+        self.linesearch_decay = linesearch_decay
+        self.max_qp_iter = max_qp_iter
+        self.qp_decay = qp_decay
+        self.gamma = gamma
 
         if self.Q.ndim == 3:
             self.Q = torch.tile(self.Q.unsqueeze(-3), (1, self.T, 1, 1))
@@ -284,7 +300,14 @@ class LQR(nn.Module):
         self.dargs = {"dtype": self.p.dtype, "device": self.p.device}
 
     def forward(
-        self, x_init, dt=1, u_traj=None, u_lower=None, u_upper=None, du=None
+        self,
+        x_init: torch.Tensor,
+        dt: int = 1,
+        u_traj: Optional[torch.Tensor] = None,
+        u_lower: Optional[torch.Tensor] = None,
+        u_upper: Optional[torch.Tensor] = None,
+        du: Optional[torch.Tensor] = None,
+        old_cost: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r"""
         Performs LQR for the discrete system.
@@ -302,13 +325,25 @@ class LQR(nn.Module):
             du (:obj:`int`, optinal): The amount each component of the controls
                 is allowed to change in each LQR iteration. Default: ``None``.
 
+            For the line search in the forward recursion:
+            old_cost (:obj:`Tensor`, optinal): The old cost of the system. Default: ``None``.
+
         Returns:
             List of :obj:`Tensor`: A list of tensors including the solved state sequence
             :math:`\mathbf{x}`, the solved input sequence :math:`\mathbf{u}`, and the
             associated quadratic costs :math:`\mathbf{c}` over the time horizon.
         """
         K, k = self.lqr_backward(x_init, dt, u_traj, u_lower, u_upper, du)
-        x, u, cost = self.lqr_forward(x_init, K, k, u_lower, u_upper, du)
+
+        x, u, cost = self.lqr_forward(
+            x_init,
+            K,
+            k,
+            u_lower,
+            u_upper,
+            du,
+            old_cost=old_cost,
+        )
         return x, u, cost
 
     def lqr_backward(
@@ -397,8 +432,6 @@ class LQR(nn.Module):
             Qxu_ = Qxu.clone()
             Qxx_ = Qxx.clone()
 
-            # TODO check the 2 different implementations
-
             if u_lower is None and u_upper is None:
 
                 L = cholesky(Quu_)
@@ -413,20 +446,24 @@ class LQR(nn.Module):
                     lb = torch.max(lb, -du)
                     ub = torch.min(ub, du)
 
-                # solve the QP problem with the constraints on the control inputs
-                # QP: min 0.5 x'Hx + q'x s.t. lower <= x <= upper
-                # H: n x n (symmetric) Hessian matrix
-                # q: n vector (linear term)
-                # lower: n vector (lower bound)
-                # upper: n vector (upper bound)
-                # x_init: n vector (initial guess)
-                # n_iter: number of iterations
+                # The following code is to find the optimal variation
+                # of the control input delta_u for the current time step
+
+                # argmin(0.5 * delta_u' * Quu * delta_u + qu' * delta_u)
+                # solved for delta_u
 
                 # prev_kt is the initial guess for the QP solver
                 # prev_kt is the delta_u from the previous iteration
 
-                kt, Qt_uu_free_LU, I_free, n_qp_iter = self.solve_qp(
-                    Quu_, qu_, lb, ub, x_init=prev_kt, n_iter=50, decay=0.2
+                kt, Qt_uu_free_LU, I_free = self.solve_qp(
+                    Quu_,
+                    qu_,
+                    lb,
+                    ub,
+                    x_init=prev_kt,
+                    n_iter=self.max_qp_iter,
+                    decay=self.qp_decay,
+                    gamma=self.gamma,
                 )
 
                 prev_kt = kt
@@ -440,7 +477,16 @@ class LQR(nn.Module):
 
         return K, k
 
-    def lqr_forward(self, x_init, K, k, u_lower=None, u_upper=None, du=None):
+    def lqr_forward(
+        self,
+        x_init,
+        K,
+        k,
+        u_lower=None,
+        u_upper=None,
+        du=None,
+        old_cost=None,
+    ):
 
         assert x_init.device == K.device == k.device
         assert x_init.dtype == K.dtype == k.dtype
@@ -453,32 +499,41 @@ class LQR(nn.Module):
         cost = torch.zeros(self.n_batch, **self.dargs)
         x = torch.zeros(self.n_batch + (self.T + 1, ns), **self.dargs)
         xt = x[..., 0, :] = x_init
-        alphas = torch.ones(self.n_batch).as_type(x_init.dtype).to(x_init.device)
-
         self.system.systime = 0
+        alphas = torch.ones(self.n_batch, **self.dargs)
+        old_cost_ = torch.zeros_like(cost) if old_cost is None else old_cost
 
-        for t in range(self.T):
-            Kt, kt = K[..., t, :, :], k[..., t, :]
-            delta_xt = xt - self.x_traj[..., t, :]
-            delta_u[..., t, :] = bmv(Kt, delta_xt) + kt  # TODO line search
-            u[..., t, :] = ut = delta_u[..., t, :] + self.u_traj[..., t, :]
+        for i in range(self.max_linesearch_iter):
+            for t in range(self.T):
+                Kt, kt = K[..., t, :, :], k[..., t, :]
+                delta_xt = xt - self.x_traj[..., t, :]
+                delta_u[..., t, :] = bmv(Kt, delta_xt) + torch.diag(alphas).mm(kt)
+                u[..., t, :] = ut = delta_u[..., t, :] + self.u_traj[..., t, :]
 
-            if u_lower is not None and u_upper is not None:
-                lb = u_lower[..., t, :]
-                ub = u_upper[..., t, :]
-                if du is not None:
-                    lb = torch.max(lb, -du)
-                    ub = torch.min(ub, du)
-                u[..., t, :] = ut = torch.clamp(ut, lb, ub)
+                if u_lower is not None and u_upper is not None:
+                    lb = u_lower[..., t, :]
+                    ub = u_upper[..., t, :]
+                    if du is not None:
+                        lb = torch.max(lb, -du)
+                        ub = torch.min(ub, du)
+                    u[..., t, :] = ut = torch.clamp(ut, lb, ub)
 
-            xut = torch.cat((xt, ut), dim=-1)
-            x[..., t + 1, :] = xt = self.system(xt, ut)[0]
-            cost = (
-                cost
-                + 0.5 * bvmv(xut, self.Q[..., t, :, :], xut)
-                + vecdot(xut, self.p[..., t, :])
+                xut = torch.cat((xt, ut), dim=-1)
+                x[..., t + 1, :] = xt = self.system(xt, ut)[0]
+                cost = (
+                    cost
+                    + 0.5 * bvmv(xut, self.Q[..., t, :, :], xut)
+                    + vecdot(xut, self.p[..., t, :])
+                )
+
+            if torch.all(cost <= old_cost_):
+                break
+            alphas[~(cost <= old_cost_)] = (
+                alphas[~(cost <= old_cost_)] * self.linesearch_decay
             )
+            x[..., 0, :] = xt = x_init
 
+        print("Number of line search iterations: ", i + 1)
         return x, u, cost
 
     def solve_qp(
@@ -490,7 +545,8 @@ class LQR(nn.Module):
         x_init: Optional[torch.Tensor] = None,
         n_iter: int = 10,
         decay: float = 0.1,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        gamma: float = 0.1,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r"""
         Solves the quadratic programming problem with box constraints.
 
@@ -512,7 +568,6 @@ class LQR(nn.Module):
             Tuple of :obj:`Tensor`: A tuple of tensors including the solution :math:`x`
             and the number of iterations.
         """
-        GAMMA = 0.1
 
         n_batch, n, _ = H.size()  # n is the number of control inputs
         pnqp_I = 1e-8 * torch.eye(n).type_as(H).expand_as(
@@ -565,7 +620,6 @@ class LQR(nn.Module):
             # TODO instead of computing the inverse of the Hessian, we can solve the linear system
             # dx_free = -H_free_free^-1 @ (q_free + H_free_constrained @ x_constrained) - x_free
 
-            # H_lu_Free = H_[..., [I_Free]].lu()
             H_lu_Free = torch.linalg.lu_factor(H_[..., [I_Free]])
 
             # if the free set is empty we can't solve the linear system
@@ -591,24 +645,24 @@ class LQR(nn.Module):
             n_J = J.sum()
 
             if n_J == 0:
-                return x, H_lu_, I_free, i
+                return x, H_lu_, I_free
 
             # Do a line search to find the step size that minimizes the objective function
             alpha = torch.ones(n_batch).type_as(x)
 
-            max_armijo = GAMMA
+            max_armijo = gamma
             for j in range(10):
                 # line search to find the step size that minimizes the objective function
                 x_new = torch.clamp(x + torch.diag(alpha).mm(dx), lower, upper)
-                armijos = (GAMMA + 1e-6) * torch.ones(n_batch).type_as(
+                armijos = (gamma + 1e-6) * torch.ones(n_batch).type_as(
                     x
                 )  # initialize the armijo condition
                 # we update the armijo condition only if the environment has a non-zero descent direction
                 armijos[J] = (obj(x) - obj(x_new))[J] / vecdot(grad, x - x_new)[J]
-                I_arm = armijos <= GAMMA
+                I_arm = armijos <= gamma
                 alpha[I_arm] = alpha[I_arm] * decay
                 max_armijo = torch.max(armijos)
-                if max_armijo > GAMMA:
+                if max_armijo > gamma:
                     break
                 print("max_armijo = ", max_armijo)
 
@@ -619,4 +673,4 @@ class LQR(nn.Module):
             "[WARNING] The solution is not optimal. The number of components that are not zero is: ",
             n_J,
         )
-        return x, H_lu_, I_free, i
+        return x, H_lu_, I_free
