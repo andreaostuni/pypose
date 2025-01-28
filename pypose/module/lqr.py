@@ -533,7 +533,6 @@ class LQR(nn.Module):
             )
             x[..., 0, :] = xt = x_init
 
-        print("Number of line search iterations: ", i + 1)
         return x, u, cost
 
     def solve_qp(
@@ -668,7 +667,7 @@ class LQR(nn.Module):
 
             x = x_new
 
-        print("The number of iterations is: ", i)
+        print("The number of qp iterations is: ", i)
         print(
             "[WARNING] The solution is not optimal. The number of components that are not zero is: ",
             n_J,

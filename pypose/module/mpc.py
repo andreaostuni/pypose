@@ -207,11 +207,21 @@ class MPC(nn.Module):
                       [ 0.1023]]])
     """
 
-    def __init__(self, system, Q, p, T, stepper=None, **kwargs):
+    def __init__(
+        self,
+        system,
+        Q,
+        p,
+        T,
+        stepper=None,
+        max_linesearch_iter=10,
+        linesearch_decay=0.5,
+        max_qp_iter=10,
+        qp_decay=0.5,
+        gamma=1e-1,
+    ):
         super().__init__()
-        self.stepper = (
-            ReduceToBason(steps=10, verbose=True) if stepper is None else stepper
-        )
+        self.stepper = ReduceToBason(steps=10) if stepper is None else stepper
         self.stepper.max_steps = (
             self.stepper.max_steps - 1
         )  # n-1 loops, 1 loop with gradient
@@ -220,11 +230,11 @@ class MPC(nn.Module):
             Q,
             p,
             T,
-            max_linesearch_iter=kwargs.get("max_linesearch_iter", 10),
-            linesearch_decay=kwargs.get("linesearch_decay", 0.5),
-            max_qp_iter=kwargs.get("max_qp_iter", 10),
-            qp_decay=kwargs.get("qp_decay", 0.5),
-            gamma=kwargs.get("gamma", 1e-1),
+            max_linesearch_iter=max_linesearch_iter,
+            linesearch_decay=linesearch_decay,
+            max_qp_iter=max_qp_iter,
+            qp_decay=qp_decay,
+            gamma=gamma,
         )
 
     def forward(self, dt, x_init, u_init=None, u_lower=None, u_upper=None, du=None):
