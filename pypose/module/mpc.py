@@ -270,8 +270,22 @@ class MPC(nn.Module):
                 )
                 self.stepper.step(cost)
 
-                if best["cost"] is None or cost < best["cost"]:
+                # if best["cost"] is None or cost < best["cost"]:
+                #     best = {"x": x, "u": u, "cost": cost}
+                # perform the comparison in batch mode
+                if best["cost"] is None:
                     best = {"x": x, "u": u, "cost": cost}
+                else:
+                    mask = cost < best["cost"]
+                    # best["x"] = torch.where(mask, x, best["x"])
+                    best["x"] = torch.stack([best["x"], x], dim=0)[
+                        mask.long(), torch.arange(mask.shape[0])
+                    ]
+
+                    best["u"] = torch.stack([best["u"], u], dim=0)[
+                        mask.long(), torch.arange(mask.shape[0])
+                    ]
+                    best["cost"] = torch.where(mask, cost, best["cost"])
         return self.lqr(
             x_init, dt, u_traj=best["u"], u_lower=u_lower, u_upper=u_upper, du=du
         )

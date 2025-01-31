@@ -440,8 +440,8 @@ class LQR(nn.Module):
                 kt = -torch.cholesky_solve(qu.unsqueeze(-1), L).squeeze(-1)
                 k[..., t, :] = kt
             else:
-                lb = u_lower[..., t, :] - u_traj[..., t, :]
-                ub = u_upper[..., t, :] - u_traj[..., t, :]
+                lb = u_lower[..., t, :] - self.u_traj[..., t, :]
+                ub = u_upper[..., t, :] - self.u_traj[..., t, :]
                 if du is not None:
                     lb = torch.max(lb, -du)
                     ub = torch.min(ub, du)
@@ -468,7 +468,7 @@ class LQR(nn.Module):
 
                 prev_kt = kt
                 Qux_ = Qux_.clone()
-                Qux_[..., I_free.logical_not().repeat(Qux_.size()[-2:])] = 0
+                Qux_[..., I_free.logical_not().unsqueeze(-1).repeat(1, 1, ns)] = 0
                 Kt = -torch.linalg.lu_solve(*Qt_uu_free_LU, Qux_)
                 K[..., t, :, :] = Kt
                 k[..., t, :] = kt
@@ -619,21 +619,19 @@ class LQR(nn.Module):
             # TODO instead of computing the inverse of the Hessian, we can solve the linear system
             # dx_free = -H_free_free^-1 @ (q_free + H_free_constrained @ x_constrained) - x_free
 
-            H_lu_Free = torch.linalg.lu_factor(H_[..., [I_Free]])
-
-            # if the free set is empty we can't solve the linear system
-            if I_free.sum() == 0:
-                dx_free = torch.zeros_like(x[..., I_free])
-            else:
-                dx_free = -torch.linalg.lu_solve(
-                    *H_lu_Free, grad_[..., I_free].unsqueeze(-1)
-                ).squeeze(-1)
-
-            dx[..., I_free] = dx_free
-            dx[..., I_constrained] = 0
-            # Compute the descent direction
+            # H_lu_Free = torch.linalg.lu_factor(H_[..., [I_Free])
 
             H_lu_ = torch.linalg.lu_factor(H_)
+            # if the free set is empty we can't solve the linear system
+            if I_free.sum() == 0:
+                dx = torch.zeros_like(x)
+            else:
+                # dx_free = -torch.linalg.lu_solve(
+                #     *H_lu_Free, grad_[..., I_free].unsqueeze(-1)
+                # ).squeeze(-1)
+                dx = -torch.linalg.lu_solve(*H_lu_, grad.unsqueeze(-1)).squeeze(-1)
+                dx[..., I_constrained] = 0
+            # Compute the descent direction
 
             # J is a mask that indicates the elements in the batch that are not zero
             J = (
