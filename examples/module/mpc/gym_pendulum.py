@@ -107,7 +107,15 @@ exp = dict(
 torch.manual_seed(0)
 
 solver_exp = Pendulum(dt, exp["len"], exp["m"], g)
-mpc_exp = pp.module.MPC(solver_exp, exp["Q"], exp["p"], T)
+mpc_exp = pp.module.MPC(
+    solver_exp,
+    exp["Q"],
+    exp["p"],
+    T,
+    max_linesearch_iter=2,
+    max_qp_iter=4,
+    qp_decay=0.2,
+)
 
 
 # %%
@@ -124,7 +132,7 @@ u_upper = torch.tile(
 )
 obs, _ = env.reset()
 # set the initial state to an upright pendulum
-env.state = [0.01, 0.0]
+
 for i in range(100):
     x_init = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
 

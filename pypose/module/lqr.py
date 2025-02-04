@@ -267,6 +267,9 @@ class LQR(nn.Module):
         Q: torch.Tensor,
         p: torch.Tensor,
         T: int,
+        u_lower: Optional[torch.Tensor] = None,
+        u_upper: Optional[torch.Tensor] = None,
+        du: Optional[torch.Tensor] = None,
         max_linesearch_iter: int = 10,
         linesearch_decay: float = 0.5,
         max_qp_iter: int = 10,
@@ -278,6 +281,9 @@ class LQR(nn.Module):
         self.Q, self.p, self.T = Q, p, T
         self.x_traj = None
         self.u_traj = None
+        self.u_lower = u_lower
+        self.u_upper = u_upper
+        self.du = du
         self.max_linesearch_iter = max_linesearch_iter
         self.linesearch_decay = linesearch_decay
         self.max_qp_iter = max_qp_iter
@@ -304,9 +310,6 @@ class LQR(nn.Module):
         x_init: torch.Tensor,
         dt: int = 1,
         u_traj: Optional[torch.Tensor] = None,
-        u_lower: Optional[torch.Tensor] = None,
-        u_upper: Optional[torch.Tensor] = None,
-        du: Optional[torch.Tensor] = None,
         old_cost: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r"""
@@ -333,27 +336,25 @@ class LQR(nn.Module):
             :math:`\mathbf{x}`, the solved input sequence :math:`\mathbf{u}`, and the
             associated quadratic costs :math:`\mathbf{c}` over the time horizon.
         """
-        K, k = self.lqr_backward(x_init, dt, u_traj, u_lower, u_upper, du)
+        K, k = self.lqr_backward(
+            x_init,
+            dt,
+            u_traj,
+        )
 
-        x, u, cost = self.lqr_forward(
+        x, u, cost, du_norm = self.lqr_forward(
             x_init,
             K,
             k,
-            u_lower,
-            u_upper,
-            du,
             old_cost=old_cost,
         )
-        return x, u, cost
+        return x, u, cost, du_norm
 
     def lqr_backward(
         self,
         x_init: torch.Tensor,
         dt: int,
         u_traj: torch.Tensor = None,
-        u_lower: Optional[torch.Tensor] = None,
-        u_upper: Optional[torch.Tensor] = None,
-        du: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Performs the backward recursion of the LQR algorithm.
@@ -363,12 +364,6 @@ class LQR(nn.Module):
             dt (:obj:`int`): The interval (:math:`\delta t`) between two time steps.
             u_traj (:obj:`Tensor`, optinal): The current inputs of the system along a
                 trajectory. Default: ``None``.
-            u_lower (:obj:`Tensor`, optinal): The lower bounds on the controls.
-                Default: ``None``.
-            u_upper (:obj:`Tensor`, optinal): The upper bounds on the controls.
-                Default: ``None``.
-            du (:obj:`int`, optinal): The amount each component of the controls
-                is allowed to change in each LQR iteration. Default: ``None``.
 
         Returns:
             Tuple of :obj:`Tensor`: A tuple of tensors including the feedback gain
@@ -432,7 +427,7 @@ class LQR(nn.Module):
             Qxu_ = Qxu.clone()
             Qxx_ = Qxx.clone()
 
-            if u_lower is None and u_upper is None:
+            if self.u_lower is None or self.u_upper is None:
 
                 L = cholesky(Quu_)
                 Kt = -torch.cholesky_solve(Qux_, L)
@@ -440,11 +435,11 @@ class LQR(nn.Module):
                 kt = -torch.cholesky_solve(qu.unsqueeze(-1), L).squeeze(-1)
                 k[..., t, :] = kt
             else:
-                lb = u_lower[..., t, :] - self.u_traj[..., t, :]
-                ub = u_upper[..., t, :] - self.u_traj[..., t, :]
-                if du is not None:
-                    lb = torch.max(lb, -du)
-                    ub = torch.min(ub, du)
+                lb = self.u_lower[..., t, :] - self.u_traj[..., t, :]
+                ub = self.u_upper[..., t, :] - self.u_traj[..., t, :]
+                if self.du is not None:
+                    lb = torch.max(lb, -self.du)
+                    ub = torch.min(ub, self.du)
 
                 # The following code is to find the optimal variation
                 # of the control input delta_u for the current time step
@@ -482,9 +477,6 @@ class LQR(nn.Module):
         x_init,
         K,
         k,
-        u_lower=None,
-        u_upper=None,
-        du=None,
         old_cost=None,
     ):
 
@@ -510,12 +502,12 @@ class LQR(nn.Module):
                 delta_u[..., t, :] = bmv(Kt, delta_xt) + torch.diag(alphas).mm(kt)
                 u[..., t, :] = ut = delta_u[..., t, :] + self.u_traj[..., t, :]
 
-                if u_lower is not None and u_upper is not None:
-                    lb = u_lower[..., t, :]
-                    ub = u_upper[..., t, :]
-                    if du is not None:
-                        lb = torch.max(lb, -du)
-                        ub = torch.min(ub, du)
+                if self.u_lower is not None and self.u_upper is not None:
+                    lb = self.u_lower[..., t, :]
+                    ub = self.u_upper[..., t, :]
+                    if self.du is not None:
+                        lb = torch.max(lb, -self.du)
+                        ub = torch.min(ub, self.du)
                     u[..., t, :] = ut = torch.clamp(ut, lb, ub)
 
                 xut = torch.cat((xt, ut), dim=-1)
@@ -533,7 +525,9 @@ class LQR(nn.Module):
             )
             x[..., 0, :] = xt = x_init
 
-        return x, u, cost
+        # get the full norm of the update in the control inputs over different iterations
+        du_norm = torch.norm((u - self.u_traj).view(-1, nc * self.T), dim=-1)
+        return x, u, cost, du_norm
 
     def solve_qp(
         self,

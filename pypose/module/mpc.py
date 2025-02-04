@@ -213,7 +213,12 @@ class MPC(nn.Module):
         Q,
         p,
         T,
+        u_lower=None,
+        u_upper=None,
+        du=None,
         stepper=None,
+        detach_unconverged=True,
+        toll_unconverged=5e-2,
         max_linesearch_iter=10,
         linesearch_decay=0.5,
         max_qp_iter=10,
@@ -225,11 +230,19 @@ class MPC(nn.Module):
         self.stepper.max_steps = (
             self.stepper.max_steps - 1
         )  # n-1 loops, 1 loop with gradient
+        self.u_lower = u_lower
+        self.u_upper = u_upper
+        self.du = du
+        self.detach_unconverged = detach_unconverged
+        self.toll_unconverged = toll_unconverged
         self.lqr = LQR(
             system,
             Q,
             p,
             T,
+            u_lower=self.u_lower,
+            u_upper=self.u_upper,
+            du=self.du,
             max_linesearch_iter=max_linesearch_iter,
             linesearch_decay=linesearch_decay,
             max_qp_iter=max_qp_iter,
@@ -237,7 +250,7 @@ class MPC(nn.Module):
             gamma=gamma,
         )
 
-    def forward(self, dt, x_init, u_init=None, u_lower=None, u_upper=None, du=None):
+    def forward(self, dt, x_init, u_init=None):
         r"""
         Performs MPC for the discrete system.
 
@@ -265,27 +278,39 @@ class MPC(nn.Module):
         self.stepper.reset()
         with torch.no_grad():
             while self.stepper.continual():
-                x, u, cost = self.lqr(
-                    x_init, dt, u, u_lower, u_upper, du, old_cost=cost
-                )
+                x, u, cost, du_norm = self.lqr(x_init, dt, u, old_cost=cost)
                 self.stepper.step(cost)
-
-                # if best["cost"] is None or cost < best["cost"]:
-                #     best = {"x": x, "u": u, "cost": cost}
                 # perform the comparison in batch mode
                 if best["cost"] is None:
-                    best = {"x": x, "u": u, "cost": cost}
+                    best = {"x": x, "u": u, "cost": cost, "du_norm": du_norm}
                 else:
-                    mask = cost < best["cost"]
-                    # best["x"] = torch.where(mask, x, best["x"])
-                    best["x"] = torch.stack([best["x"], x], dim=0)[
-                        mask.long(), torch.arange(mask.shape[0])
-                    ]
+                    mask = cost < best["cost"]  # (n_batch)
+                    best["x"] = torch.where(
+                        mask.unsqueeze(-1)
+                        .unsqueeze(-1)
+                        .expand(-1, x.shape[-2], x.shape[-1]),
+                        x,
+                        best["x"],
+                    )  # (n_batch, T, n_state)
+                    best["u"] = torch.where(
+                        mask.unsqueeze(-1)
+                        .unsqueeze(-1)
+                        .expand(-1, u.shape[-2], u.shape[-1]),
+                        u,
+                        best["u"],
+                    )  # (n_batch, T, n_ctrl)
 
-                    best["u"] = torch.stack([best["u"], u], dim=0)[
-                        mask.long(), torch.arange(mask.shape[0])
-                    ]
                     best["cost"] = torch.where(mask, cost, best["cost"])
-        return self.lqr(
-            x_init, dt, u_traj=best["u"], u_lower=u_lower, u_upper=u_upper, du=du
-        )
+                    best["du_norm"] = torch.where(mask, du_norm, best["du_norm"])
+                if max(du_norm) < self.toll_unconverged:
+                    break
+        # if self.detach_unconverged and torch.any(
+        #     best["du_norm"] > self.toll_unconverged
+        # ):
+        #     Converged = best["cost"] < self.toll_unconverged
+        #     best["u"] = torch.where(
+        #         Converged.unsqueeze(-1), best["u"], best["u"].detach()
+        #     )
+        #     return self.lqr(x_init, dt, u_traj=best["u"])[:-1]
+        # TODO it if we do not reach the fixed point (we do a last iteration)
+        return self.lqr(x_init, dt, u_traj=best["u"])[:-1]
