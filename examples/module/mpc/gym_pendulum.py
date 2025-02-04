@@ -105,13 +105,20 @@ exp = dict(
 )
 
 torch.manual_seed(0)
-
+u_lower = torch.tile(
+    torch.tensor(env.action_space.low, device=device), (n_batch, T, n_ctrl)
+)
+u_upper = torch.tile(
+    torch.tensor(env.action_space.high, device=device), (n_batch, T, n_ctrl)
+)
 solver_exp = Pendulum(dt, exp["len"], exp["m"], g)
 mpc_exp = pp.module.MPC(
     solver_exp,
     exp["Q"],
     exp["p"],
     T,
+    u_lower=u_lower,
+    u_upper=u_upper,
     max_linesearch_iter=2,
     max_qp_iter=4,
     qp_decay=0.2,
@@ -124,12 +131,7 @@ env.action_space
 
 # %%
 # Interact with the environment using the MPC model
-u_lower = torch.tile(
-    torch.tensor(env.action_space.low, device=device), (n_batch, T, n_ctrl)
-)
-u_upper = torch.tile(
-    torch.tensor(env.action_space.high, device=device), (n_batch, T, n_ctrl)
-)
+
 obs, _ = env.reset()
 # set the initial state to an upright pendulum
 
@@ -137,7 +139,9 @@ for i in range(100):
     x_init = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
 
     x_true, u_true, cost = mpc_exp(
-        dt, x_init, u_init=current_u, u_lower=u_lower, u_upper=u_upper
+        dt,
+        x_init,
+        u_init=current_u,
     )
     # print(f"x_true: {x_true} vs x_init: {x_init} vs obs: {obs}")
     # print(f"u_true: {u_true}")
