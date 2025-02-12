@@ -3,6 +3,8 @@ from .. import bmv
 from torch import nn
 from torch.autograd.functional import jacobian
 
+from torch.func import vmap, vjp, jvp, jacrev, jacfwd
+
 
 class System(nn.Module):
     r"""
@@ -606,10 +608,34 @@ class NLS(System):
             \mathbf{A} = \left. \frac{\partial \mathbf{f}}{\partial \mathbf{x}} \right|_{\chi^*}
         """
 
-        def func(x):
-            return self.state_transition(x, self._ref_input, self._ref_t)
+        # def func(x):
+        #     return self.state_transition(x, self._ref_input, self._ref_t)
 
-        return jacobian(func, self._ref_state, **self.jacargs)
+        def single_func(x):
+            return self.state_transition(x, self._ref_input, self._ref_t).sum(0)
+
+        # use jacrev and vmap to compute jacobian for each batch
+        # time_start = torch.cuda.Event(enable_timing=True)
+        # time_b = torch.cuda.Event(enable_timing=True)
+        # time_a = torch.cuda.Event(enable_timing=True)
+        # time_end = torch.cuda.Event(enable_timing=True)
+        # time_start.record()
+        # sol_a = vmap(jacrev(func), in_dims=0)(self._ref_state)
+        # time_a.record()
+        # sob_b = jacobian(func, self._ref_state, **self.jacargs)
+        # time_b.record()
+        # sol_c = jacrev(single_func)(self._ref_state).movedim(1, 0)
+        # time_end.record()
+
+        # torch.cuda.synchronize()
+        # print("vmap time: ", time_start.elapsed_time(time_a))
+        # print("jacobian time: ", time_a.elapsed_time(time_b))
+        # print("single time: ", time_b.elapsed_time(time_end))
+        # print("total time: ", time_start.elapsed_time(time_end))
+
+        # return jacobian(func, self._ref_state, **self.jacargs)
+        # return sol_c
+        return jacrev(single_func)(self._ref_state).movedim(1, 0)
 
     @property
     def B(self):
@@ -623,7 +649,12 @@ class NLS(System):
         def func(x):
             return self.state_transition(self._ref_state, x, self._ref_t)
 
-        return jacobian(func, self._ref_input, **self.jacargs)
+        def single_func(x):
+            return self.state_transition(self._ref_state, x, self._ref_t).sum(0)
+
+        # return jacobian(func, self._ref_input, **self.jacargs)
+        # return vmap(jacrev(func))(self._ref_input)
+        return jacrev(single_func)(self._ref_input).movedim(1, 0)
 
     @property
     def C(self):
@@ -634,10 +665,14 @@ class NLS(System):
             \mathbf{C} = \left. \frac{\partial \mathbf{g}}{\partial \mathbf{x}} \right|_{\chi^*}
         """
 
-        def func(x):
-            return self.observation(x, self._ref_input, self._ref_t)
+        # def func(x):
+        #     return self.observation(x, self._ref_input, self._ref_t)
+        def single_func(x):
+            return self.state_transition(x, self._ref_input, self._ref_t).sum(0)
 
-        return jacobian(func, self._ref_state, **self.jacargs)
+        # return jacobian(func, self._ref_state, **self.jacargs)
+        # return vmap(jacrev(func))(self._ref_state)
+        return jacrev(single_func)(self._ref_state).movedim(1, 0)
 
     @property
     def D(self):
@@ -652,7 +687,12 @@ class NLS(System):
         def func(x):
             return self.observation(self._ref_state, x, self._ref_t)
 
-        return jacobian(func, self._ref_input, **self.jacargs)
+        # return jacobian(func, self._ref_input, **self.jacargs)
+        # return vmap(jacrev(func))(self._ref_input)
+        def single_func(x):
+            return self.state_transition(self._ref_state, x, self._ref_t).sum(0)
+
+        return jacrev(single_func)(self._ref_input).movedim(1, 0)
 
     @property
     def c1(self):

@@ -424,9 +424,9 @@ class LQR(nn.Module):
                 )
                 A = self.system.A
                 B = self.system.B
-                if A.ndim == 4:
-                    A = torch.stack([A[i, :, i, :] for i in range(A.shape[0])])
-                    B = torch.stack([B[i, :, i, :] for i in range(B.shape[0])])
+                # if A.ndim == 4:
+                #     A = torch.stack([A[i, :, i, :] for i in range(A.shape[0])])
+                #     B = torch.stack([B[i, :, i, :] for i in range(B.shape[0])])
 
                 F = torch.cat((A, B), dim=-1)
                 # Qt = self.Q[..., t, :, :] + F.mT @ V @ F
