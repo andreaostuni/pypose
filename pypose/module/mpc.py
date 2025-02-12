@@ -2,6 +2,7 @@ import torch
 from .lqr import LQR
 from torch import nn
 from ..utils.stepper import ReduceToBason
+from torch.autograd.profiler import record_function
 
 
 class MPC(nn.Module):
@@ -210,8 +211,8 @@ class MPC(nn.Module):
     def __init__(
         self,
         system,
-        Q,
-        p,
+        # Q,
+        # p,
         T,
         u_lower=None,
         u_upper=None,
@@ -237,8 +238,8 @@ class MPC(nn.Module):
         self.toll_unconverged = toll_unconverged
         self.lqr = LQR(
             system,
-            Q,
-            p,
+            # Q,
+            # p,
             T,
             u_lower=self.u_lower,
             u_upper=self.u_upper,
@@ -250,7 +251,7 @@ class MPC(nn.Module):
             gamma=gamma,
         )
 
-    def forward(self, dt, x_init, u_init=None):
+    def forward(self, x_init, Q, p, dt, u_init=None):
         r"""
         Performs MPC for the discrete system.
 
@@ -278,7 +279,7 @@ class MPC(nn.Module):
         self.stepper.reset()
         with torch.no_grad():
             while self.stepper.continual():
-                x, u, cost, du_norm = self.lqr(x_init, dt, u, old_cost=cost)
+                x, u, cost, du_norm = self.lqr(x_init, Q, p, dt, u, old_cost=cost)
                 self.stepper.step(cost)
                 # perform the comparison in batch mode
                 if best["cost"] is None:
@@ -313,4 +314,5 @@ class MPC(nn.Module):
         #     )
         #     return self.lqr(x_init, dt, u_traj=best["u"])[:-1]
         # TODO it if we do not reach the fixed point (we do a last iteration)
-        return self.lqr(x_init, dt, u_traj=best["u"])[:-1]
+        with record_function("Last iteration"):
+            return self.lqr(x_init, Q, p, dt, u_traj=best["u"])[:-1]

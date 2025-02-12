@@ -62,7 +62,7 @@ class CartPole(pp.module.NLS):
 
 
 if __name__ == "__main__":
-
+    torch.autograd.set_detect_anomaly(True)
     parser = argparse.ArgumentParser(
         description="MPC Nonl-inear Learning Example \
                                      (Cartpole)"
@@ -118,16 +118,47 @@ if __name__ == "__main__":
         # expert
         solver_exp = CartPole(dt, exp["len"], exp["m_cart"], exp["m_pole"], g)
         stepper_exp = pp.utils.ReduceToBason(steps=15, verbose=False)
+        # mpc_expert = pp.module.MPC(
+        #     solver_exp, exp["Q"], exp["p"], T, stepper=stepper_exp
+        # )
+        # x_true, u_true, cost_true = mpc_expert(dt, x_init, u_init=current_u)
         mpc_expert = pp.module.MPC(
-            solver_exp, exp["Q"], exp["p"], T, stepper=stepper_exp
+            solver_exp,
+            # exp["Q"],
+            # exp["p"],
+            T,
+            u_lower=torch.tile(torch.tensor(-10.0, device=args.device), (T, n_ctrl)),
+            u_upper=torch.tile(torch.tensor(10.0, device=args.device), (T, n_ctrl)),
+            stepper=stepper_exp,
+            max_linesearch_iter=2,
+            max_qp_iter=4,
+            qp_decay=0.2,
         )
-        x_true, u_true, cost_true = mpc_expert(dt, x_init, u_init=current_u)
+
+        x_true, u_true, cost_true = mpc_expert(
+            x_init, exp["Q"], exp["p"], dt, u_init=current_u
+        )
 
         # agent
         solver_agt = CartPole(dt, _len, exp["m_cart"], _m_pole, g)
         stepper_agt = pp.utils.ReduceToBason(steps=15, verbose=False)
-        mpc_agt = pp.module.MPC(solver_agt, exp["Q"], exp["p"], T, stepper=stepper_agt)
-        x_pred, u_pred, cost_pred = mpc_agt(dt, x_init, u_init=current_u)
+        # mpc_agt = pp.module.MPC(solver_agt, exp["Q"], exp["p"], T, stepper=stepper_agt)
+        # x_pred, u_pred, cost_pred = mpc_agt(dt, x_init, u_init=current_u)
+        mpc_agt = pp.module.MPC(
+            solver_agt,
+            # exp["Q"],
+            # exp["p"],
+            T,
+            u_lower=torch.tile(torch.tensor(-10.0, device=args.device), (T, n_ctrl)),
+            u_upper=torch.tile(torch.tensor(10.0, device=args.device), (T, n_ctrl)),
+            stepper=stepper_agt,
+            max_linesearch_iter=2,
+            max_qp_iter=4,
+            qp_decay=0.2,
+        )
+        x_pred, u_pred, cost_pred = mpc_agt(
+            x_init, exp["Q"], exp["p"], dt, u_init=current_u
+        )
 
         traj_loss = ((u_true - u_pred) ** 2).mean() + ((x_true - x_pred) ** 2).mean()
 

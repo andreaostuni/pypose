@@ -265,8 +265,8 @@ class LQR(nn.Module):
     def __init__(
         self,
         system: nn.Module,
-        Q: torch.Tensor,
-        p: torch.Tensor,
+        # Q: torch.Tensor,
+        # p: torch.Tensor,
         T: int,
         u_lower: Optional[torch.Tensor] = None,
         u_upper: Optional[torch.Tensor] = None,
@@ -279,7 +279,8 @@ class LQR(nn.Module):
     ):
         super().__init__()
         self.system = system
-        self.Q, self.p, self.T = Q, p, T
+        # self.Q, self.p, self.T = Q, p, T
+        self.T = T
         self.x_traj = None
         self.u_traj = None
         self.u_lower = u_lower
@@ -291,24 +292,25 @@ class LQR(nn.Module):
         self.qp_decay = qp_decay
         self.gamma = gamma
 
-        if self.Q.ndim == 3:
-            self.Q = torch.tile(self.Q.unsqueeze(-3), (1, self.T, 1, 1))
+        # if self.Q.ndim == 3:
+        #     self.Q = torch.tile(self.Q.unsqueeze(-3), (1, self.T, 1, 1))
 
-        if self.p.ndim == 2:
-            self.p = torch.tile(self.p.unsqueeze(-2), (1, self.T, 1))
+        # if self.p.ndim == 2:
+        #     self.p = torch.tile(self.p.unsqueeze(-2), (1, self.T, 1))
 
-        self.n_batch = self.p.shape[:-2]
-
-        assert self.Q.shape[:-1] == self.p.shape, "Shape not compatible."
-        assert self.Q.size(-1) == self.Q.size(-2), "Shape not compatible."
-        assert self.Q.ndim == 4 or self.p.ndim == 3, "Shape not compatible."
-        assert self.Q.device == self.p.device, "Device not compatible."
-        assert self.Q.dtype == self.p.dtype, "Tensor data type not compatible."
-        self.dargs = {"dtype": self.p.dtype, "device": self.p.device}
+        # assert self.Q.shape[:-1] == self.p.shape, "Shape not compatible."
+        # assert self.Q.size(-1) == self.Q.size(-2), "Shape not compatible."
+        # assert self.Q.ndim == 4 or self.p.ndim == 3, "Shape not compatible."
+        # assert self.Q.device == self.p.device, "Device not compatible."
+        # assert self.Q.dtype == self.p.dtype, "Tensor data type not compatible."
+        # self.dargs = {"dtype": self.p.dtype, "device": self.p.device}
+        self.dargs = None
 
     def forward(
         self,
         x_init: torch.Tensor,
+        Q: torch.Tensor,
+        p: torch.Tensor,
         dt: int = 1,
         u_traj: Optional[torch.Tensor] = None,
         old_cost: Optional[torch.Tensor] = None,
@@ -320,6 +322,8 @@ class LQR(nn.Module):
             x_init (:obj:`Tensor`): The initial state of the system.
             dt (:obj:`int`): The interval (:math:`\delta t`) between two time steps.
                 Default: `1`.
+            Q (:obj:`Tensor`): The weight matrix of the quadratic term.
+            p (:obj:`Tensor`): The weight vector of the first-order term.
             u_traj (:obj:`Tensor`, optinal): The current inputs of the system along a
                 trajectory. Default: ``None``.
             u_lower (:obj:`Tensor`, optinal): The lower bounds on the controls.
@@ -337,14 +341,22 @@ class LQR(nn.Module):
             :math:`\mathbf{x}`, the solved input sequence :math:`\mathbf{u}`, and the
             associated quadratic costs :math:`\mathbf{c}` over the time horizon.
         """
+        if self.dargs is None:
+            self.dargs = {"dtype": p.dtype, "device": p.device}
+            # self.n_batch = p.shape[:-2]
+
         K, k = self.lqr_backward(
             x_init,
+            Q,
+            p,
             dt,
             u_traj,
         )
 
         x, u, cost, du_norm = self.lqr_forward(
             x_init,
+            Q,
+            p,
             K,
             k,
             old_cost=old_cost,
@@ -354,6 +366,8 @@ class LQR(nn.Module):
     def lqr_backward(
         self,
         x_init: torch.Tensor,
+        Q: torch.Tensor,
+        p: torch.Tensor,
         dt: int,
         u_traj: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -371,12 +385,13 @@ class LQR(nn.Module):
             :math:`\mathbf{K}` and the feedforward term :math:`\mathbf{k}`.
         """
 
-        ns, nsc = x_init.size(-1), self.p.size(-1)
+        # ns, nsc = x_init.size(-1), self.p.size(-1)
+        ns, nsc, n_batch = x_init.size(-1), p.size(-1), x_init.size(0)
         nc = nsc - ns
         prev_kt = None
 
         if u_traj is None:
-            self.u_traj = torch.zeros(self.n_batch + (self.T, nc), **self.dargs)
+            self.u_traj = torch.zeros((n_batch, self.T, nc), **self.dargs)
         else:
             self.u_traj = u_traj
 
@@ -384,18 +399,20 @@ class LQR(nn.Module):
 
         self.x_traj = runsys(self.system, self.T, self.x_traj, self.u_traj)
 
-        K = torch.zeros(self.n_batch + (self.T, nc, ns), **self.dargs)
-        k = torch.zeros(self.n_batch + (self.T, nc), **self.dargs)
+        K = torch.zeros((n_batch, self.T, nc, ns), **self.dargs)
+        k = torch.zeros((n_batch, self.T, nc), **self.dargs)
 
-        V = torch.zeros(self.n_batch + (self.T, nsc, nsc), **self.dargs)
-        v = torch.zeros(self.n_batch + (self.T, nsc), **self.dargs)
+        V = torch.zeros((n_batch, self.T, nsc, nsc), **self.dargs)
+        v = torch.zeros((n_batch, self.T, nsc), **self.dargs)
 
         xut = torch.cat((self.x_traj[..., : self.T, :], self.u_traj), dim=-1)
-        p = bmv(self.Q, xut) + self.p
+        # p = bmv(self.Q, xut) + self.p
+        p = bmv(Q, xut) + p
 
         for t in range(self.T - 1, -1, -1):
             if t == self.T - 1:
-                Qt = self.Q[..., t, :, :]
+                # Qt = self.Q[..., t, :, :]
+                Qt = Q[..., t, :, :]
                 qt = p[..., t, :]
             else:
                 self.system.set_refpoint(
@@ -412,7 +429,8 @@ class LQR(nn.Module):
                     B = torch.stack([B[i, :, i, :] for i in range(B.shape[0])])
 
                 F = torch.cat((A, B), dim=-1)
-                Qt = self.Q[..., t, :, :] + F.mT @ V @ F
+                # Qt = self.Q[..., t, :, :] + F.mT @ V @ F
+                Qt = Q[..., t, :, :] + F.mT @ V @ F
                 qt = p[..., t, :] + bmv(F.mT, v)
 
             Qt_, qt_ = Qt.clone(), qt.clone()
@@ -436,8 +454,11 @@ class LQR(nn.Module):
                 kt = -torch.cholesky_solve(qu.unsqueeze(-1), L).squeeze(-1)
                 k[..., t, :] = kt
             else:
-                lb = self.u_lower[..., t, :] - self.u_traj[..., t, :]
-                ub = self.u_upper[..., t, :] - self.u_traj[..., t, :]
+                # self.u_lower is a tensor of shape (T, nc)
+                # lb = self.u_lower[..., t, :] - self.u_traj[..., t, :]
+                # ub = self.u_upper[..., t, :] - self.u_traj[..., t, :]
+                lb = self.u_lower[t, :].unsqueeze(0) - self.u_traj[..., t, :]
+                ub = self.u_upper[t, :].unsqueeze(0) - self.u_traj[..., t, :]
                 if self.du is not None:
                     lb = torch.max(lb, -self.du)
                     ub = torch.min(ub, self.du)
@@ -477,6 +498,8 @@ class LQR(nn.Module):
     def lqr_forward(
         self,
         x_init,
+        Q,
+        p,
         K,
         k,
         old_cost=None,
@@ -486,15 +509,19 @@ class LQR(nn.Module):
         assert x_init.dtype == K.dtype == k.dtype
         assert x_init.ndim == 2, "Shape not compatible."
 
-        ns, nc = self.x_traj.size(-1), self.u_traj.size(-1)
+        ns, nc, n_batch = (
+            self.x_traj.size(-1),
+            self.u_traj.size(-1),
+            self.x_traj.size(0),
+        )
 
-        u = torch.zeros(self.n_batch + (self.T, nc), **self.dargs)
-        delta_u = torch.zeros(self.n_batch + (self.T, nc), **self.dargs)
-        cost = torch.zeros(self.n_batch, **self.dargs)
-        x = torch.zeros(self.n_batch + (self.T + 1, ns), **self.dargs)
+        u = torch.zeros((n_batch, self.T, nc), **self.dargs)
+        delta_u = torch.zeros((n_batch, self.T, nc), **self.dargs)
+        cost = torch.zeros(n_batch, **self.dargs)
+        x = torch.zeros((n_batch, self.T + 1, ns), **self.dargs)
         xt = x[..., 0, :] = x_init
         self.system.systime = 0
-        alphas = torch.ones(self.n_batch, **self.dargs)
+        alphas = torch.ones(n_batch, **self.dargs)
         old_cost_ = torch.zeros_like(cost) if old_cost is None else old_cost
 
         for i in range(self.max_linesearch_iter):
@@ -505,8 +532,8 @@ class LQR(nn.Module):
                 u[..., t, :] = ut = delta_u[..., t, :] + self.u_traj[..., t, :]
 
                 if self.u_lower is not None and self.u_upper is not None:
-                    lb = self.u_lower[..., t, :]
-                    ub = self.u_upper[..., t, :]
+                    lb = self.u_lower[t, :].unsqueeze(0)
+                    ub = self.u_upper[t, :].unsqueeze(0)
                     if self.du is not None:
                         lb = torch.max(lb, -self.du)
                         ub = torch.min(ub, self.du)
@@ -516,8 +543,10 @@ class LQR(nn.Module):
                 x[..., t + 1, :] = xt = self.system(xt, ut)[0]
                 cost = (
                     cost
-                    + 0.5 * bvmv(xut, self.Q[..., t, :, :], xut)
-                    + vecdot(xut, self.p[..., t, :])
+                    # + 0.5 * bvmv(xut, self.Q[..., t, :, :], xut)
+                    + 0.5 * bvmv(xut, Q[..., t, :, :], xut)
+                    # + vecdot(xut, self.p[..., t, :])
+                    + vecdot(xut, p[..., t, :])
                 )
 
             if torch.all(cost <= old_cost_):

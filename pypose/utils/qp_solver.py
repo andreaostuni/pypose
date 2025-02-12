@@ -1,7 +1,7 @@
 import torch
 from typing import Tuple, Optional
 from pypose import bmv, bvmv
-from torch.linalg import cholesky, vecdot
+from torch.linalg import vecdot
 
 
 def solve_qp(
@@ -13,6 +13,7 @@ def solve_qp(
     n_iter: int = 10,
     decay: float = 0.1,
     gamma: float = 0.1,
+    grad_tol: float = 5e-4,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     r"""
         Solves the quadratic programming problem with box constraints.
@@ -53,8 +54,10 @@ def solve_qp(
         # x_init = - H^-1 @ q
         # H_lu = torch.linalg.lu_factor(H)
         # x_init = -torch.linalg.lu_solve(*H_lu, q.unsqueeze(-1)).squeeze(-1)
-        H_LLT = torch.linalg.cholesky(H)
-        x_init = -torch.cholesky_solve(q.unsqueeze(-1), H_LLT).squeeze(-1)
+        # H_LLT = torch.linalg.cholesky(H_)
+        # x_init = -torch.cholesky_solve(q.unsqueeze(-1), H_LLT).squeeze(-1)
+        H_lu = torch.linalg.lu_factor(H)
+        x_init = -torch.linalg.lu_solve(*H_lu, q.unsqueeze(-1)).squeeze(-1)
     else:
         x_init = x_init.clone()  # Don't over-write the original x_init.
 
@@ -85,17 +88,13 @@ def solve_qp(
 
         H_ = H_ + pnqp_I  # add a small value to the diagonal to avoid numerical issues
 
-        # TODO instead of computing the inverse of the Hessian, we can solve the linear system
-        # dx_free = -H_free_free^-1 @ (q_free + H_free_constrained @ x_constrained) - x_free
-
-        # H_lu_Free = torch.linalg.lu_factor(H_[..., [I_Free])
-
         H_LLT_ = torch.linalg.cholesky(
             H_
         )  # if the free set is empty we can't solve the linear system
+        J = torch.zeros(n_batch, dtype=torch.bool, device=H.device)
+
         if I_free.sum() == 0:
             dx = torch.zeros_like(x)
-            n_J = 0
         else:
             # dx_free = -torch.linalg.lu_solve(
             #     *H_lu_Free, grad_[..., I_free].unsqueeze(-1)
@@ -103,44 +102,30 @@ def solve_qp(
             # dx = -torch.linalg.lu_solve(*H_lu_, grad.unsqueeze(-1)).squeeze(-1)
             dx = -torch.cholesky_solve(grad.unsqueeze(-1), H_LLT_).squeeze(-1)
             dx[..., I_constrained] = 0
-            # J is a mask that indicates the elements in the batch that are not zero
-            # J = (
-            #     torch.norm(dx, dim=-1) > 1e-4
-            # )  # Check if the norm of the descent direction is greater than 1e-4
-            # infinity norm
-            J = torch.norm(grad[..., I_free], dim=-1, p=float("inf")) > 1e-4
 
-            # compute the number of environments that have a non-zero descent direction
-            n_J = J.sum()
-            # Compute the descent direction
+        J = torch.norm(grad_, dim=-1, p=float("inf")) >= grad_tol
 
-        if n_J == 0:
+        # compute the number of environments that have a non-zero descent direction
+        # if all J are zero, we can break the loop
+        if (~J).all():
             return x, H_LLT_, I_free
 
         # Do a line search to find the step size that minimizes the objective function
         alpha = torch.ones(n_batch).type_as(x)
 
-        max_armijo = gamma
+        # max_armijo = gamma
         for j in range(10):
             # line search to find the step size that minimizes the objective function
             x_new = torch.clamp(x + torch.diag(alpha).mm(dx), lower, upper)
-            armijos = (gamma + 1e-6) * torch.ones(n_batch).type_as(
-                x
-            )  # initialize the armijo condition
-            # we update the armijo condition only if the environment has a non-zero descent direction
-            armijos[J] = (obj(x) - obj(x_new))[J] / vecdot(grad, x - x_new)[J]
-            I_arm = armijos <= gamma
-            alpha[I_arm] = alpha[I_arm] * decay
-            max_armijo = torch.max(armijos)
-            if max_armijo > gamma:
+            I_arm = J.clone()
+            I_arm[J] = (obj(x) - obj(x_new))[J] > gamma * vecdot(grad, (x - x_new))[J]
+
+            if I_arm.all():
+                x = x_new
                 break
-            print("max_armijo = ", max_armijo)
-
-        x = x_new
-
-    print("The number of qp iterations is: ", i)
-    print(
-        "[WARNING] The solution is not optimal. The number of components that are not zero is: ",
-        n_J,
-    )
+            alpha[~I_arm] = alpha[~I_arm] * decay
+    # print(
+    #     "[WARNING] The solution is not optimal. The number of components that are not zero is: ",
+    #     J.sum().item(),
+    # )
     return x, H_LLT_, I_free
