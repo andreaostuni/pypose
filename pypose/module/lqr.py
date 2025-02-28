@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from .. import bmv, bvmv
 from .dynamics import runsys
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union, Callable, Dict
 from torch.linalg import cholesky, vecdot
 from pypose.utils.qp_solver import solve_qp
 
@@ -265,12 +265,11 @@ class LQR(nn.Module):
     def __init__(
         self,
         system: nn.Module,
-        # Q: torch.Tensor,
-        # p: torch.Tensor,
         T: int,
         u_lower: Optional[torch.Tensor] = None,
         u_upper: Optional[torch.Tensor] = None,
         du: Optional[torch.Tensor] = None,
+        action_dim: Optional[int] = None,
         max_linesearch_iter: int = 10,
         linesearch_decay: float = 0.5,
         max_qp_iter: int = 10,
@@ -279,39 +278,35 @@ class LQR(nn.Module):
     ):
         super().__init__()
         self.system = system
-        # self.Q, self.p, self.T = Q, p, T
         self.T = T
         self.x_traj = None
         self.u_traj = None
         self.u_lower = u_lower
         self.u_upper = u_upper
         self.du = du
+
+        self.action_dim = action_dim
+        if self.action_dim is not None:
+            assert self.action_dim == u_lower.size(-1)
+        else:
+            assert (
+                u_lower is not None and u_upper is not None
+            ), "action_dim or u bounds must be provided"
+            self.action_dim = u_lower.size(-1)
+
         self.max_linesearch_iter = max_linesearch_iter
         self.linesearch_decay = linesearch_decay
         self.max_qp_iter = max_qp_iter
         self.qp_decay = qp_decay
         self.gamma = gamma
-
-        # if self.Q.ndim == 3:
-        #     self.Q = torch.tile(self.Q.unsqueeze(-3), (1, self.T, 1, 1))
-
-        # if self.p.ndim == 2:
-        #     self.p = torch.tile(self.p.unsqueeze(-2), (1, self.T, 1))
-
-        # assert self.Q.shape[:-1] == self.p.shape, "Shape not compatible."
-        # assert self.Q.size(-1) == self.Q.size(-2), "Shape not compatible."
-        # assert self.Q.ndim == 4 or self.p.ndim == 3, "Shape not compatible."
-        # assert self.Q.device == self.p.device, "Device not compatible."
-        # assert self.Q.dtype == self.p.dtype, "Tensor data type not compatible."
-        # self.dargs = {"dtype": self.p.dtype, "device": self.p.device}
         self.dargs = None
 
     def forward(
         self,
         x_init: torch.Tensor,
-        Q: torch.Tensor,
-        p: torch.Tensor,
+        cost_fn: Union[Tuple[torch.Tensor, torch.Tensor], Callable],
         dt: int = 1,
+        cost_kwargs: Optional[Dict] = None,
         u_traj: Optional[torch.Tensor] = None,
         old_cost: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -322,8 +317,10 @@ class LQR(nn.Module):
             x_init (:obj:`Tensor`): The initial state of the system.
             dt (:obj:`int`): The interval (:math:`\delta t`) between two time steps.
                 Default: `1`.
-            Q (:obj:`Tensor`): The weight matrix of the quadratic term.
-            p (:obj:`Tensor`): The weight vector of the first-order term.
+            cost_fn (:obj:`Tuple`): The cost function of the system.
+                can be a tuple of Q, p or a callable function.
+            cost_kwargs (:obj:`Dict`, optinal): The additional arguments for the cost function.
+                Default: ``None``. (only used when cost_fn is a callable function)
             u_traj (:obj:`Tensor`, optinal): The current inputs of the system along a
                 trajectory. Default: ``None``.
             u_lower (:obj:`Tensor`, optinal): The lower bounds on the controls.
@@ -342,52 +339,60 @@ class LQR(nn.Module):
             associated quadratic costs :math:`\mathbf{c}` over the time horizon.
         """
         if self.dargs is None:
-            self.dargs = {"dtype": p.dtype, "device": p.device}
+            self.dargs = {"dtype": x_init.dtype, "device": x_init.device}
             # self.n_batch = p.shape[:-2]
+        if cost_kwargs is None and callable(cost_fn):
+            cost_kwargs = {"args": (), "ndims": ()}
 
         K, k = self.lqr_backward(
-            x_init,
-            Q,
-            p,
-            dt,
-            u_traj,
+            x_init=x_init,
+            cost_fn=cost_fn,
+            cost_kwargs=cost_kwargs,
+            dt=dt,
+            u_traj=u_traj,
         )
+
+        # instead of using Q, p, we use the cost function
 
         x, u, cost, du_norm = self.lqr_forward(
             x_init,
-            Q,
-            p,
-            K,
-            k,
+            cost_fn=cost_fn,
+            cost_kwargs=cost_kwargs,
+            K=K,
+            k=k,
             old_cost=old_cost,
         )
         return x, u, cost, du_norm
 
+    @torch.compile
     def lqr_backward(
         self,
         x_init: torch.Tensor,
-        Q: torch.Tensor,
-        p: torch.Tensor,
+        cost_fn: Union[Tuple[torch.Tensor, torch.Tensor], Callable],
         dt: int,
         u_traj: torch.Tensor = None,
+        cost_kwargs: Optional[Dict] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Performs the backward recursion of the LQR algorithm.
 
         Args:
             x_init (:obj:`Tensor`): The initial state of the system.
+            cost_fn (:obj:`Tuple`): The cost function of the system.
+                can be a tuple of Q, p or a callable function.
             dt (:obj:`int`): The interval (:math:`\delta t`) between two time steps.
             u_traj (:obj:`Tensor`, optinal): The current inputs of the system along a
                 trajectory. Default: ``None``.
+            cost_kwargs (:obj:`Dict`, optinal): The additional arguments for the cost function.
+                Default: ``None``. (only used when cost_fn is a callable function)
 
         Returns:
             Tuple of :obj:`Tensor`: A tuple of tensors including the feedback gain
             :math:`\mathbf{K}` and the feedforward term :math:`\mathbf{k}`.
         """
 
-        # ns, nsc = x_init.size(-1), self.p.size(-1)
-        ns, nsc, n_batch = x_init.size(-1), p.size(-1), x_init.size(0)
-        nc = nsc - ns
+        ns, nc, n_batch = x_init.size(-1), self.action_dim, x_init.size(0)
+        nsc = ns + nc
         prev_kt = None
 
         if u_traj is None:
@@ -406,12 +411,16 @@ class LQR(nn.Module):
         v = torch.zeros((n_batch, self.T, nsc), **self.dargs)
 
         xut = torch.cat((self.x_traj[..., : self.T, :], self.u_traj), dim=-1)
-        # p = bmv(self.Q, xut) + self.p
-        p = bmv(Q, xut) + p
+        # Compute the Q, p for the cost function
+        if isinstance(cost_fn, Tuple):
+            Q, p = cost_fn
+            p = bmv(Q, xut) + p
+        else:
+            assert cost_kwargs is not None, "cost_kwargs must be provided."
+            Q, p = self.linearize_cost(cost_fn, cost_kwargs, xut)
 
         for t in range(self.T - 1, -1, -1):
             if t == self.T - 1:
-                # Qt = self.Q[..., t, :, :]
                 Qt = Q[..., t, :, :]
                 qt = p[..., t, :]
             else:
@@ -424,12 +433,8 @@ class LQR(nn.Module):
                 )
                 A = self.system.A
                 B = self.system.B
-                # if A.ndim == 4:
-                #     A = torch.stack([A[i, :, i, :] for i in range(A.shape[0])])
-                #     B = torch.stack([B[i, :, i, :] for i in range(B.shape[0])])
 
                 F = torch.cat((A, B), dim=-1)
-                # Qt = self.Q[..., t, :, :] + F.mT @ V @ F
                 Qt = Q[..., t, :, :] + F.mT @ V @ F
                 qt = p[..., t, :] + bmv(F.mT, v)
 
@@ -454,9 +459,6 @@ class LQR(nn.Module):
                 kt = -torch.cholesky_solve(qu.unsqueeze(-1), L).squeeze(-1)
                 k[..., t, :] = kt
             else:
-                # self.u_lower is a tensor of shape (T, nc)
-                # lb = self.u_lower[..., t, :] - self.u_traj[..., t, :]
-                # ub = self.u_upper[..., t, :] - self.u_traj[..., t, :]
                 lb = self.u_lower[t, :].unsqueeze(0) - self.u_traj[..., t, :]
                 ub = self.u_upper[t, :].unsqueeze(0) - self.u_traj[..., t, :]
                 if self.du is not None:
@@ -495,11 +497,12 @@ class LQR(nn.Module):
 
         return K, k
 
+    @torch.compile
     def lqr_forward(
         self,
         x_init,
-        Q,
-        p,
+        cost_fn,
+        cost_kwargs,
         K,
         k,
         old_cost=None,
@@ -520,7 +523,7 @@ class LQR(nn.Module):
         cost = torch.zeros(n_batch, **self.dargs)
         x = torch.zeros((n_batch, self.T + 1, ns), **self.dargs)
         xt = x[..., 0, :] = x_init
-        self.system.systime = 0
+        self.system.reset()
         alphas = torch.ones(n_batch, **self.dargs)
         old_cost_ = torch.zeros_like(cost) if old_cost is None else old_cost
 
@@ -541,13 +544,15 @@ class LQR(nn.Module):
 
                 xut = torch.cat((xt, ut), dim=-1)
                 x[..., t + 1, :] = xt = self.system(xt, ut)[0]
-                cost = (
-                    cost
-                    # + 0.5 * bvmv(xut, self.Q[..., t, :, :], xut)
-                    + 0.5 * bvmv(xut, Q[..., t, :, :], xut)
-                    # + vecdot(xut, self.p[..., t, :])
-                    + vecdot(xut, p[..., t, :])
-                )
+                if isinstance(cost_fn, Tuple):
+                    Q, p = cost_fn
+                    cost = (
+                        cost
+                        + 0.5 * bvmv(xut, Q[..., t, :, :], xut)
+                        + vecdot(xut, p[..., t, :])
+                    )
+                else:
+                    cost = cost + cost_fn(xut, *cost_kwargs["args"])
 
             if torch.all(cost <= old_cost_):
                 break
@@ -559,3 +564,50 @@ class LQR(nn.Module):
         # get the full norm of the update in the control inputs over different iterations
         du_norm = torch.norm((u - self.u_traj).view(-1, nc * self.T), dim=-1)
         return x, u, cost, du_norm
+
+    @torch.compile
+    def linearize_cost(
+        self, cost_fn: Callable, cost_kwargs: Dict, xut: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Linearizes the cost function.
+
+        Args:
+            cost_fn (:obj:`Callable`): The cost function of the system.
+            cost_kwargs (:obj:`Dict`): The additional arguments for the cost function.
+            xut (:obj:`Tensor`): The concatenated tensor of state and input.
+
+        Returns:
+            Tuple of :obj:`Tensor`: A tuple of tensors including the Q and p for the cost function.
+        """
+        from torch.func import vmap, jacrev, hessian
+
+        # the xut is the concatenated tensor of state and input over the time horizon
+        # xut [n_batch, T, n_state + n_ctrl]
+
+        p = (
+            vmap(
+                vmap(jacrev(cost_fn, argnums=0), in_dims=(0, *cost_kwargs["ndims"])),
+                in_dims=(1, *[None for _ in range(len(cost_kwargs["ndims"]))]),
+            )(xut, *cost_kwargs["args"])
+            .movedim(1, 0)
+            .squeeze(2)
+        )
+        Q = (
+            vmap(
+                vmap(hessian(cost_fn, argnums=0), in_dims=(0, *cost_kwargs["ndims"])),
+                in_dims=(1, *[None for _ in range(len(cost_kwargs["ndims"]))]),
+            )(xut, *cost_kwargs["args"])
+            .movedim(1, 0)
+            .squeeze(2)
+        ) * 0.5
+
+        # the last term in the time horizon is the terminal cost
+        # Q[..., -1, -self.action_dim :, -self.action_dim :] = (
+        #     Q[..., -1, -self.action_dim :, -self.action_dim :] * 10.0
+        # )
+        # p[..., -1, -self.action_dim :] = p[..., -1, -self.action_dim :] * 10.0
+        # Q[..., -1, -self.action_dim :, -self.action_dim :] = 1e-8
+        # p[..., -1, -self.action_dim :] = 1e-8
+        Q = Q + 1e-8 * torch.eye(Q.size(-1), **self.dargs)
+        return Q, p

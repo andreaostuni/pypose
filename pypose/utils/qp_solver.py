@@ -4,6 +4,7 @@ from pypose import bmv, bvmv
 from torch.linalg import vecdot
 
 
+@torch.compile
 def solve_qp(
     H: torch.Tensor,
     q: torch.Tensor,
@@ -52,10 +53,6 @@ def solve_qp(
         # If we don't have an initial guess, we can use the following
         # formula to get an initial guess.
         # x_init = - H^-1 @ q
-        # H_lu = torch.linalg.lu_factor(H)
-        # x_init = -torch.linalg.lu_solve(*H_lu, q.unsqueeze(-1)).squeeze(-1)
-        # H_LLT = torch.linalg.cholesky(H_)
-        # x_init = -torch.cholesky_solve(q.unsqueeze(-1), H_LLT).squeeze(-1)
         H_lu = torch.linalg.lu_factor(H)
         x_init = -torch.linalg.lu_solve(*H_lu, q.unsqueeze(-1)).squeeze(-1)
     else:
@@ -96,10 +93,6 @@ def solve_qp(
         if I_free.sum() == 0:
             dx = torch.zeros_like(x)
         else:
-            # dx_free = -torch.linalg.lu_solve(
-            #     *H_lu_Free, grad_[..., I_free].unsqueeze(-1)
-            # ).squeeze(-1)
-            # dx = -torch.linalg.lu_solve(*H_lu_, grad.unsqueeze(-1)).squeeze(-1)
             dx = -torch.cholesky_solve(grad.unsqueeze(-1), H_LLT_).squeeze(-1)
             dx[..., I_constrained] = 0
 

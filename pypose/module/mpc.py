@@ -11,8 +11,8 @@ class MPC(nn.Module):
 
     Args:
         system (:obj:`instance`): The system to be soved by MPC.
-        Q (:obj:`Tensor`): The weight matrix of the quadratic term.
-        p (:obj:`Tensor`): The weight vector of the first-order term.
+        cost_fn (:obj:`function`): The cost function of the system.
+        cost_kwargs (:obj:`dict`): The arguments of the cost function.
         T (:obj:`int`): Time steps of system.
         stepper (``Planner``, optional): the stepper to stop iterations. If ``None``,
             the ``pypose.utils.ReduceToBason`` with a maximum of 10 steps are used.
@@ -211,12 +211,11 @@ class MPC(nn.Module):
     def __init__(
         self,
         system,
-        # Q,
-        # p,
         T,
         u_lower=None,
         u_upper=None,
         du=None,
+        action_dim=None,
         stepper=None,
         detach_unconverged=True,
         toll_unconverged=5e-2,
@@ -227,7 +226,11 @@ class MPC(nn.Module):
         gamma=1e-1,
     ):
         super().__init__()
-        self.stepper = ReduceToBason(steps=10) if stepper is None else stepper
+        self.stepper = (
+            ReduceToBason(steps=10, device=system.systime.device)
+            if stepper is None
+            else stepper
+        )
         self.stepper.max_steps = (
             self.stepper.max_steps - 1
         )  # n-1 loops, 1 loop with gradient
@@ -238,12 +241,11 @@ class MPC(nn.Module):
         self.toll_unconverged = toll_unconverged
         self.lqr = LQR(
             system,
-            # Q,
-            # p,
             T,
             u_lower=self.u_lower,
             u_upper=self.u_upper,
             du=self.du,
+            action_dim=action_dim,
             max_linesearch_iter=max_linesearch_iter,
             linesearch_decay=linesearch_decay,
             max_qp_iter=max_qp_iter,
@@ -251,21 +253,18 @@ class MPC(nn.Module):
             gamma=gamma,
         )
 
-    def forward(self, x_init, Q, p, dt, u_init=None):
+    def forward(self, x_init, cost_fn, dt, cost_kwargs=None, u_init=None):
         r"""
         Performs MPC for the discrete system.
 
         Args:
-            dt (:obj:`int`): The interval (:math:`\delta t`) between two time steps.
             x_init (:obj:`Tensor`): The initial state of the system.
+            cost_fn (:obj:`function`): The cost function of the system.
+            dt (:obj:`int`): The interval (:math:`\delta t`) between two time steps.
+            cost_kwargs (:obj:`dict`, optional): The arguments of the cost function.
+                Default: ``None``.
             u_init (:obj:`Tensor`, optinal): The current inputs of the system along a
                 trajectory. Default: ``None``.
-            u_lower (:obj:`Tensor`, optinal): The lower bounds on the controls.
-                Default: ``None``.
-            u_upper (:obj:`Tensor`, optinal): The upper bounds on the controls.
-                Default: ``None``.
-            du (:obj:`int`, optinal): The amount each component of the controls
-                is allowed to change in each LQR iteration. Default: ``None``.
 
         Returns:
             List of :obj:`Tensor`: A list of tensors including the solved state sequence
@@ -279,7 +278,15 @@ class MPC(nn.Module):
         self.stepper.reset()
         with torch.no_grad():
             while self.stepper.continual():
-                x, u, cost, du_norm = self.lqr(x_init, Q, p, dt, u, old_cost=cost)
+                x, u, cost, du_norm = self.lqr(
+                    x_init=x_init,
+                    cost_fn=cost_fn,
+                    dt=dt,
+                    cost_kwargs=cost_kwargs,
+                    u_traj=u,
+                    old_cost=cost,
+                )
+
                 self.stepper.step(cost)
                 # perform the comparison in batch mode
                 if best["cost"] is None:
@@ -305,14 +312,12 @@ class MPC(nn.Module):
                     best["du_norm"] = torch.where(mask, du_norm, best["du_norm"])
                 if max(du_norm) < self.toll_unconverged:
                     break
-        # if self.detach_unconverged and torch.any(
-        #     best["du_norm"] > self.toll_unconverged
-        # ):
-        #     Converged = best["cost"] < self.toll_unconverged
-        #     best["u"] = torch.where(
-        #         Converged.unsqueeze(-1), best["u"], best["u"].detach()
-        #     )
-        #     return self.lqr(x_init, dt, u_traj=best["u"])[:-1]
-        # TODO it if we do not reach the fixed point (we do a last iteration)
+
         with record_function("Last iteration"):
-            return self.lqr(x_init, Q, p, dt, u_traj=best["u"])[:-1]
+            return self.lqr(
+                x_init=x_init,
+                cost_fn=cost_fn,
+                dt=dt,
+                cost_kwargs=cost_kwargs,
+                u_traj=best["u"],
+            )[:-1]

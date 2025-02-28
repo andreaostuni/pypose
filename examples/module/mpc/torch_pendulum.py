@@ -3,17 +3,20 @@ import torch
 import pypose as pp
 import numpy as np
 import gymnasium as gym
+import time
 
 import torch._dynamo
 
 torch._dynamo.config.cache_size_limit = 64  # Increase cache limit from 8 to 64
+from skrl_examples.environments.pytorch_pendulum_env import PendulumEnvTorch
 
-ENV_NAME = "Pendulum-v1"
+
+# ENV_NAME = "Pendulum-v1"
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cuda")
-n_batch, n_state, n_ctrl, T = 1, 3, 1, 20
-dt = 0.05
+device = torch.device("cpu")
+n_batch, n_state, n_ctrl, T = 1, 3, 1, 5
+dt = 0.2
 g = 10.0
 time_ = torch.arange(0, T, device=device) * dt
 current_u = torch.sin(time_).unsqueeze(1).unsqueeze(0)
@@ -21,13 +24,17 @@ current_u = current_u.repeat(n_batch, 1, 1)
 
 
 def timed(fn):
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
+    # start = torch.cuda.Event(enable_timing=True)
+    # end = torch.cuda.Event(enable_timing=True)
+    if device == torch.device("cuda"):
+        torch.cuda.synchronize()
+
+    start = time.perf_counter()
     result = fn()
-    end.record()
+    end = time.perf_counter()
     torch.cuda.synchronize()
-    return result, start.elapsed_time(end) / 1000
+    # print(f"elapsed time: {end - start}")
+    return result, start - end
 
 
 # %%
@@ -99,7 +106,8 @@ def cost_fn(trajectory):
 
 
 # %%
-env = gym.make_vec(ENV_NAME, render_mode="human", num_envs=n_batch)
+# env = gym.make_vec(ENV_NAME, render_mode="human", num_envs=n_batch)
+env = PendulumEnvTorch(num_envs=n_batch, device=device)
 # env = gym.make_vec(ENV_NAME, num_envs=n_batch)
 # %%
 # expert
@@ -132,12 +140,12 @@ exp = dict(
 torch.manual_seed(0)
 u_lower = torch.tile(torch.tensor(env.action_space.low, device=device), (T, n_ctrl))
 u_upper = torch.tile(torch.tensor(env.action_space.high, device=device), (T, n_ctrl))
-solver_exp = Pendulum(dt, exp["len"], exp["m"], g).to(device)
+solver_exp = Pendulum(dt, exp["len"], exp["m"], g)
 
 # compile the MPC model
 
 mpc_exp = pp.module.MPC(
-    solver_exp,
+    solver_exp.to(device),
     T,
     u_lower=u_lower,
     u_upper=u_upper,
@@ -180,9 +188,9 @@ mpc_opt = pp.module.MPC(
     qp_decay=0.2,
 ).to(device)
 for i in range(100):
-    x_init = torch.tensor(obs, dtype=torch.float32, device=device)
+    x_init = obs.clone().detach().to(device)
 
-    (x_true, u_true, cost), time = timed(
+    (x_true, u_true, cost), time_ms = timed(
         lambda: mpc_opt(
             x_init,
             # (exp["Q"], exp["p"]),
@@ -192,14 +200,15 @@ for i in range(100):
         )
     )
 
-    print(f"compiled evaluation time: {time}")
+    print(f"compiled evaluation time: {time_ms} ms")
     # print the top 10 functions that take up the most time
     # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
-    action = u_true[0, 0:1].detach().cpu().numpy()
+    action = u_true[0, 0:1].detach()
     # print(f"action: {action}")
-    action.reshape(1, -1)
+    # action.reshape(1, -1)
     # action = 0 if action < 0 else 1
-    obs, reward, truncated, terminated, _ = env.step(np.array(action))
+    obs, reward, truncated, terminated, _ = env.step(action)
+    env.render()
     u_init = u_true
     # u_init = torch.cat(
     #     (

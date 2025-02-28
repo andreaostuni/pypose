@@ -3,7 +3,8 @@ import torch
 
 class _Stepper(object):
 
-    def __init__(self, max_steps, verbose=False):
+    def __init__(self, max_steps, verbose=False, device=None):
+        self.device = device
         self.max_steps, self.verbose = max_steps, verbose
         self.reset()
 
@@ -11,12 +12,12 @@ class _Stepper(object):
         return self._continual
 
     def reset(self):
-        self.last = torch.tensor(float('inf'))
+        self.last = torch.tensor(float("inf"), device=self.device)
         self.steps, self._continual = 0, True
 
 
 class ReduceToBason(_Stepper):
-    r'''
+    r"""
     A stepper to stop a loop when no relative loss 'decreasing' is seen for a 'patience'
     number of steps.
 
@@ -49,23 +50,26 @@ class ReduceToBason(_Stepper):
         ReduceToBason step 3 loss 1.853019e-01.
         ReduceToBason step 4 loss 3.433681e-02.
         ReduceToBason: Maximum steps reached, Quiting..
-    '''
-    def __init__(self, steps, patience=5, decreasing=1e-3, tol=1e-5, verbose=False):
-        super().__init__(steps, verbose)
+    """
+
+    def __init__(
+        self, steps, patience=5, decreasing=1e-3, tol=1e-5, verbose=False, device=None
+    ):
+        super().__init__(steps, verbose, device=device)
         self.decreasing, self.tol = decreasing, tol
         self.patience, self.patience_count = patience, 0
 
     def step(self, loss):
-        r'''
+        r"""
         Performs a stepper step.
 
         Args:
             loss (``float`` or ``torch.Tensor``): the model loss after one loop.
                 Can be a batched tensor. If batched tensor, all losses in the batch has to
                 satisfy the condition to stop a loop.
-        '''
+        """
         if self.verbose:
-            print('ReduceToBason step', self.steps, 'loss', loss)
+            print("ReduceToBason step", self.steps, "loss", loss)
 
         if not torch.is_tensor(loss):
             loss = torch.tensor(loss)
@@ -82,7 +86,7 @@ class ReduceToBason(_Stepper):
             if self.verbose:
                 print("ReduceToBason: Maximum steps reached, Quiting..")
 
-        if torch.all((self.last - loss)/loss < self.decreasing):
+        if torch.all((self.last - loss) / loss < self.decreasing):
             self.patience_count = self.patience_count + 1
         else:
             self.patience_count = 0
