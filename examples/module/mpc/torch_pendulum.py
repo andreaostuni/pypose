@@ -2,7 +2,8 @@
 import torch
 import pypose as pp
 import numpy as np
-import gymnasium as gym
+
+# import gymnasium as gym
 import time
 
 import torch._dynamo

@@ -4,7 +4,7 @@ from pypose import bmv, bvmv
 from torch.linalg import vecdot
 
 
-@torch.compile
+# @torch.compile
 def solve_qp(
     H: torch.Tensor,
     q: torch.Tensor,
