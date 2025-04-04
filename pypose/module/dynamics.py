@@ -539,11 +539,9 @@ class NLS(System):
         <https://github.com/pypose/pypose/tree/main/examples/module/dynamics>`_.
     """
 
-    def __init__(self):
+    def __init__(self, use_custom_jacobians=False):
         super().__init__()
-        # self.jacargs = {"vectorize": True, "strategy": "reverse-mode"}
-        # TODO: Add jacargs to the class
-        self.jacargs = {"vectorize": False, "strategy": "reverse-mode"}
+        self.use_custom_jacobians = use_custom_jacobians
 
     def forward(self, state, input):
         r"""
@@ -599,6 +597,24 @@ class NLS(System):
         self._ref_g = self.observation(self._ref_state, self._ref_input, self._ref_t)
         return self
 
+    def custom_jacobians(self, state, input, t):
+        r"""
+        Function to compute the jacobians of the system.
+
+        Args:
+            state (:obj:`Tensor`): The reference state of the dynamical system. If ``None``,
+                the the most recent state is taken. Default: ``None``.
+            input (:obj:`Tensor`): The reference input to the dynamical system. If ``None``,
+                the the most recent input is taken. Default: ``None``.
+            t (:obj:`Tensor`): The reference time step of the dynamical system. If ``None``,
+                the the most recent timestamp is taken. Default: ``None``.
+
+        Returns:
+            The tuple of jacobians of the system.
+        """
+
+        raise NotImplementedError("The users need to define their own jacobian method")
+
     @property
     def A(self):
         r"""
@@ -611,7 +627,9 @@ class NLS(System):
         def func(x):
             return self.state_transition(x, self._ref_input, self._ref_t).sum(0)
 
-        return jacrev(func)(self._ref_state).movedim(1, 0)
+        if not self.use_custom_jacobians:
+            return jacrev(func)(self._ref_state).movedim(1, 0)
+        return self.custom_jacobians(self._ref_state, self._ref_input, self._ref_t)[0]
 
     @property
     def B(self):
@@ -625,7 +643,9 @@ class NLS(System):
         def single_func(x):
             return self.state_transition(self._ref_state, x, self._ref_t).sum(0)
 
-        return jacrev(single_func)(self._ref_input).movedim(1, 0)
+        if not self.use_custom_jacobians:
+            return jacrev(single_func)(self._ref_input).movedim(1, 0)
+        return self.custom_jacobians(self._ref_state, self._ref_input, self._ref_t)[1]
 
     @property
     def C(self):
@@ -637,9 +657,11 @@ class NLS(System):
         """
 
         def func(x):
-            return self.state_transition(x, self._ref_input, self._ref_t).sum(0)
+            return self.observation(x, self._ref_input, self._ref_t).sum(0)
 
-        return jacrev(func)(self._ref_state).movedim(1, 0)
+        if not self.use_custom_jacobians:
+            return jacrev(func)(self._ref_state).movedim(1, 0)
+        return self.custom_jacobians(self._ref_state, self._ref_input, self._ref_t)[2]
 
     @property
     def D(self):
@@ -652,9 +674,11 @@ class NLS(System):
         """
 
         def func(x):
-            return self.state_transition(self._ref_state, x, self._ref_t).sum(0)
+            return self.observation(self._ref_state, x, self._ref_t).sum(0)
 
-        return jacrev(func)(self._ref_input).movedim(1, 0)
+        if not self.use_custom_jacobians:
+            return jacrev(func)(self._ref_input).movedim(1, 0)
+        return self.custom_jacobians(self._ref_state, self._ref_input, self._ref_t)[3]
 
     @property
     def c1(self):
@@ -717,7 +741,10 @@ def runsys(system: System, T, x_traj, u_traj):
 
     system.systime = torch.tensor(0, device=x_traj.device)
 
-    for i in range(T - 1):
-        x_traj_[..., i + 1, :], _ = system(x_traj_[..., i, :], u_traj_[..., i, :])
+    x_traj_seq = torch.unbind(x_traj_, dim=-2)  # Unbind across the time dimension
+    u_traj_seq = torch.unbind(u_traj_, dim=-2)
 
+    for i in range(T - 1):
+        # x_traj_[..., i + 1, :], _ = system(x_traj_[..., i, :], u_traj_[..., i, :])
+        x_traj_[..., i + 1, :], _ = system(x_traj_seq[i], u_traj_seq[i])
     return x_traj_

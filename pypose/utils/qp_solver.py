@@ -4,7 +4,7 @@ from pypose import bmv, bvmv
 from torch.linalg import vecdot
 
 
-# @torch.compile(mode="reduce-overhead", fullgraph=True)
+# @torch.compile(mode="reduce-overhead")
 def solve_qp(
     H: torch.Tensor,
     q: torch.Tensor,
@@ -53,8 +53,8 @@ def solve_qp(
         # If we don't have an initial guess, we can use the following
         # formula to get an initial guess.
         # x_init = - H^-1 @ q
-        LU, pivots, info = torch.linalg.lu_factor_ex(H)
-        x_init = -torch.linalg.lu_solve(LU, pivots, q.unsqueeze(-1)).squeeze(-1)
+        L, info = torch.linalg.cholesky_ex(H)
+        x_init = -torch.cholesky_solve(q.unsqueeze(-1), L).squeeze(-1)
     else:
         x_init = x_init.clone()  # Don't over-write the original x_init.
 
@@ -88,7 +88,6 @@ def solve_qp(
         H_LLT_, info = torch.linalg.cholesky_ex(
             H_
         )  # if the free set is empty we can't solve the linear system
-        assert (info == 0).all(), "The matrix is not positive definite"
         J = torch.zeros(n_batch, dtype=torch.bool, device=H.device)
 
         if I_free.sum() == 0:

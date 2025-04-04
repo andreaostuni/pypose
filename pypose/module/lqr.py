@@ -452,8 +452,8 @@ class LQR(nn.Module):
             Qxx_ = Qxx.clone()
 
             if self.u_lower is None or self.u_upper is None:
-
-                L = cholesky(Quu_)
+                # L = cholesky(Quu_)
+                L, _ = torch.linalg.cholesky_ex(Quu_)
                 Kt = -torch.cholesky_solve(Qux_, L)
                 K[..., t, :, :] = Kt
                 kt = -torch.cholesky_solve(qu.unsqueeze(-1), L).squeeze(-1)
@@ -520,14 +520,36 @@ class LQR(nn.Module):
 
         u = torch.zeros((n_batch, self.T, nc), **self.dargs)
         delta_u = torch.zeros((n_batch, self.T, nc), **self.dargs)
-        cost = torch.zeros(n_batch, **self.dargs)
+
         x = torch.zeros((n_batch, self.T + 1, ns), **self.dargs)
         xt = x[..., 0, :] = x_init
         self.system.reset()
         alphas = torch.ones(n_batch, **self.dargs)
-        old_cost_ = torch.zeros_like(cost) if old_cost is None else old_cost
-
+        old_cost_ = (
+            torch.full((n_batch,), float("inf"), **self.dargs)
+            if old_cost is None
+            else old_cost
+        )
+        if old_cost is None:
+            if isinstance(cost_fn, Tuple):
+                Q, p = cost_fn
+                old_cost_ = 0.5 * bvmv(
+                    torch.cat((self.x_traj[..., : self.T, :], self.u_traj), dim=-1),
+                    Q,
+                    torch.cat((self.x_traj[..., : self.T, :], self.u_traj), dim=-1),
+                ).sum(dim=-1) + vecdot(
+                    torch.cat((self.x_traj[..., : self.T, :], self.u_traj), dim=-1),
+                    p,
+                ).sum(
+                    dim=-1
+                )
+            else:
+                old_cost_ = cost_fn(
+                    torch.cat((self.x_traj[..., : self.T, :], self.u_traj), dim=-1),
+                    *cost_kwargs["args"],
+                ).sum(dim=-1)
         for i in range(self.max_linesearch_iter):
+            cost = torch.zeros(n_batch, **self.dargs)
             for t in range(self.T):
                 Kt, kt = K[..., t, :, :], k[..., t, :]
                 delta_xt = xt - self.x_traj[..., t, :]
