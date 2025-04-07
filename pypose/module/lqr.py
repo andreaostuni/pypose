@@ -5,6 +5,7 @@ from .dynamics import runsys
 from typing import Optional, Tuple, Union, Callable, Dict
 from torch.linalg import cholesky, vecdot
 from pypose.utils.qp_solver import solve_qp
+from torch.func import vmap, jacrev, hessian
 
 
 class LQR(nn.Module):
@@ -544,10 +545,21 @@ class LQR(nn.Module):
                     dim=-1
                 )
             else:
-                old_cost_ = cost_fn(
-                    torch.cat((self.x_traj[..., : self.T, :], self.u_traj), dim=-1),
-                    *cost_kwargs["args"],
-                ).sum(dim=-1)
+                # use vmap to compute the cost function over the time horizon
+                old_cost_ = (
+                    vmap(
+                        cost_fn,
+                        in_dims=(
+                            1,
+                            *[None for _ in range(len(cost_kwargs["in_dims"]))],
+                        ),
+                    )(
+                        torch.cat((self.x_traj[..., : self.T, :], self.u_traj), dim=-1),
+                        *cost_kwargs["args"],
+                    )
+                    .movedim(1, 0)
+                    .sum(dim=-1)
+                )
         for i in range(self.max_linesearch_iter):
             cost = torch.zeros(n_batch, **self.dargs)
             for t in range(self.T):
@@ -602,7 +614,6 @@ class LQR(nn.Module):
         Returns:
             Tuple of :obj:`Tensor`: A tuple of tensors including the Q and p for the cost function.
         """
-        from torch.func import vmap, jacrev, hessian
 
         # the xut is the concatenated tensor of state and input over the time horizon
         # xut [n_batch, T, n_state + n_ctrl]
